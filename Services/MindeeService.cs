@@ -75,4 +75,17 @@ namespace CarInsuranceBot.Services
                 // Extract vehicle data using standardized document field identifiers
                 // a: Plate, e: VIN, d1: Make/Brand, c1: Owner
                 string plateNumber = fields.TryGetValue("a", out var aProp) ? aProp.ToString() : "Not found";
-                string vin = fields.TryGetValue("e", out var eProp) ? eProp.ToString
+                string vin = fields.TryGetValue("e", out var eProp) ? eProp.ToString() : "Not found";
+                string brand = fields.TryGetValue("d1", out var d1Prop) ? d1Prop.ToString() : "Not found";
+                string owner = fields.TryGetValue("c1", out var c1Prop) ? c1Prop.ToString() : "Not found";
+
+                return $"🚗 Brand: {brand}\n🔢 Plate No: {plateNumber}\n🆔 VIN: {vin}\n👤 Owner: {owner}";
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Mindee SDK Error (Vehicle): {ex.Message}");
+                return "Failed to recognize vehicle registration document.";
+            }
+        }
+    }
+}
