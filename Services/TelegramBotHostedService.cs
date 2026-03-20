@@ -4,13 +4,16 @@ using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using CarInsuranceBot.Models;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using System;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace CarInsuranceBot.Services
 {
-    /// <summary>
-    /// Background service that manages the Telegram Bot lifecycle.
-    /// Implements a state-machine logic to guide users through the insurance application process.
-    /// </summary>
     public class TelegramBotHostedService : BackgroundService
     {
         private readonly ITelegramBotClient _botClient;
@@ -37,7 +40,7 @@ namespace CarInsuranceBot.Services
         {
             var receiverOptions = new ReceiverOptions
             {
-                AllowedUpdates = Array.Empty<UpdateType>() // Receive all update types
+                AllowedUpdates = Array.Empty<UpdateType>()
             };
 
             _botClient.StartReceiving(
@@ -60,12 +63,10 @@ namespace CarInsuranceBot.Services
             var chatId = message.Chat.Id;
             var session = _sessionService.GetSession(chatId);
 
-            // --- 1. HANDLE TEXT UPDATES ---
             if (message.Type == MessageType.Text)
             {
                 await HandleTextUpdateAsync(botClient, message, session, cancellationToken);
             }
-            // --- 2. HANDLE PHOTO UPDATES ---
             else if (message.Type == MessageType.Photo)
             {
                 await HandlePhotoUpdateAsync(botClient, message, session, cancellationToken);
@@ -77,49 +78,79 @@ namespace CarInsuranceBot.Services
             var messageText = message.Text ?? string.Empty;
             var chatId = message.Chat.Id;
 
-            // Command: /start
+            // 1. Команда /start
             if (messageText == "/start")
             {
                 session.CurrentState = BotState.WaitingForPassport;
                 _sessionService.UpdateSession(session);
 
-                string welcome = "Welcome! I am your AI Insurance Assistant. 🚘\n\n" +
-                                 "I will help you issue your policy quickly.\n" +
-                                 "To begin, please send a clear photo of your Passport.";
+                await botClient.SendMessage(chatId, "Thinking... ⏳", cancellationToken: cancellationToken);
+                string prompt = "Introduce yourself as a polite AI Car Insurance Assistant. Ask the user to begin by sending a clear photo of their Passport.";
+                string welcome = await _groqService.GenerateBotResponseAsync(prompt);
 
                 await botClient.SendMessage(chatId, welcome, cancellationToken: cancellationToken);
                 return;
             }
 
-            // Step: Passport Data Confirmation
+            // 2. Подтверждение данных паспорта
             if (session.CurrentState == BotState.WaitingForDataConfirmation)
             {
-                if (messageText.ToLower() == "yes" || messageText.ToLower() == "да")
+                await botClient.SendMessage(chatId, "Thinking... ⏳", cancellationToken: cancellationToken);
+                if (messageText.ToLower() == "yes" || messageText.ToLower() == "да" || messageText.ToLower() == "y")
                 {
                     session.CurrentState = BotState.WaitingForVehicleDocument;
                     _sessionService.UpdateSession(session);
-                    await botClient.SendMessage(chatId, "Great! Now please send a photo of your Vehicle Registration document.", cancellationToken: cancellationToken);
+
+                    string prompt = "The user confirmed their passport data is correct. Thank them, and now ask them to send a clear photo of their Vehicle Registration document.";
+                    string aiResponse = await _groqService.GenerateBotResponseAsync(prompt);
+                    await botClient.SendMessage(chatId, aiResponse, cancellationToken: cancellationToken);
                 }
                 else
                 {
                     session.CurrentState = BotState.WaitingForPassport;
                     _sessionService.UpdateSession(session);
-                    await botClient.SendMessage(chatId, "Understood. Let's try again. Please send a clearer photo of your passport.", cancellationToken: cancellationToken);
+
+                    string prompt = "The user indicated the extracted passport data was incorrect. Apologize and politely ask them to retake and resubmit a clearer photo of their passport.";
+                    string aiResponse = await _groqService.GenerateBotResponseAsync(prompt);
+                    await botClient.SendMessage(chatId, aiResponse, cancellationToken: cancellationToken);
                 }
                 return;
             }
 
-            // Step: Vehicle Data Confirmation & Final Message Generation
+            // 3. Подтверждение данных техпаспорта (Пункт 5 из ТЗ)
             if (session.CurrentState == BotState.WaitingForPaymentConfirmation)
             {
-                if (messageText.ToLower() == "yes" || messageText.ToLower() == "да")
+                await botClient.SendMessage(chatId, "Thinking... ⏳", cancellationToken: cancellationToken);
+                if (messageText.ToLower() == "yes" || messageText.ToLower() == "да" || messageText.ToLower() == "y")
                 {
-                    await botClient.SendMessage(chatId, "Generating your policy and preparing response... ⏳", cancellationToken: cancellationToken);
+                    session.CurrentState = BotState.WaitingForPriceConfirmation;
+                    _sessionService.UpdateSession(session);
 
-                    // Fetch creative AI response from Groq
+                    string prompt = "The user confirmed their vehicle data. Inform the user that the fixed price for the car insurance is exactly 100 USD. Ask them if they agree with this price by replying 'Yes' or 'No'.";
+                    string aiResponse = await _groqService.GenerateBotResponseAsync(prompt);
+                    await botClient.SendMessage(chatId, aiResponse, cancellationToken: cancellationToken);
+                }
+                else
+                {
+                    session.CurrentState = BotState.WaitingForVehicleDocument;
+                    _sessionService.UpdateSession(session);
+
+                    string prompt = "The user indicated the extracted vehicle data was incorrect. Apologize and politely ask them to retake and resubmit a clearer photo of their vehicle document.";
+                    string aiResponse = await _groqService.GenerateBotResponseAsync(prompt);
+                    await botClient.SendMessage(chatId, aiResponse, cancellationToken: cancellationToken);
+                }
+                return;
+            }
+
+            // 4. Подтверждение цены 100 USD и генерация полиса
+            if (session.CurrentState == BotState.WaitingForPriceConfirmation)
+            {
+                await botClient.SendMessage(chatId, "Generating your policy and preparing response... ⏳", cancellationToken: cancellationToken);
+                if (messageText.ToLower() == "yes" || messageText.ToLower() == "да" || messageText.ToLower() == "y")
+                {
+                    // Пункт 6 из ТЗ: Финальный полис
                     string finalMessage = await _groqService.GenerateFinalMessageAsync();
 
-                    // Reset session state for future applications
                     session.CurrentState = BotState.Start;
                     _sessionService.UpdateSession(session);
 
@@ -127,14 +158,17 @@ namespace CarInsuranceBot.Services
                 }
                 else
                 {
-                    session.CurrentState = BotState.WaitingForVehicleDocument;
-                    _sessionService.UpdateSession(session);
-                    await botClient.SendMessage(chatId, "Let's try recognizing the vehicle document again. Please upload the photo.", cancellationToken: cancellationToken);
+                    string prompt = "The user disagreed with the price. Apologize politely and explain that 100 USD is the only available fixed price for this insurance policy. Ask if they agree to proceed with 100 USD by replying 'Yes'.";
+                    string aiResponse = await _groqService.GenerateBotResponseAsync(prompt);
+                    await botClient.SendMessage(chatId, aiResponse, cancellationToken: cancellationToken);
                 }
                 return;
             }
 
-            await botClient.SendMessage(chatId, $"Current Status: {session.CurrentState}. Please follow the instructions above.", cancellationToken: cancellationToken);
+            // Если бот не понял команду
+            string fallbackPrompt = "The user sent an unrecognized command. Politely ask them to follow the current instructions or type /start to restart the process.";
+            string fallbackResponse = await _groqService.GenerateBotResponseAsync(fallbackPrompt);
+            await botClient.SendMessage(chatId, fallbackResponse, cancellationToken: cancellationToken);
         }
 
         private async Task HandlePhotoUpdateAsync(ITelegramBotClient botClient, Message message, UserSession session, CancellationToken cancellationToken)
@@ -142,7 +176,7 @@ namespace CarInsuranceBot.Services
             var chatId = message.Chat.Id;
             var photoId = message.Photo!.Last().FileId;
 
-            // Scenario: Processing Passport Photo
+            // Обработка Паспорта
             if (session.CurrentState == BotState.WaitingForPassport)
             {
                 await botClient.SendMessage(chatId, "✅ Passport photo received! Processing with Mindee AI... ⏳", cancellationToken: cancellationToken);
@@ -155,7 +189,11 @@ namespace CarInsuranceBot.Services
                     session.CurrentState = BotState.WaitingForDataConfirmation;
                     _sessionService.UpdateSession(session);
 
-                    await botClient.SendMessage(chatId, $"🎯 Extraction Complete!\n\n{parsedData}\n\nIs this correct? (Reply 'Yes' or 'No')", cancellationToken: cancellationToken);
+                    await botClient.SendMessage(chatId, "Thinking... ⏳", cancellationToken: cancellationToken);
+                    string prompt = $"Tell the user that you successfully extracted their passport data:\n{parsedData}\nPolitely ask them to confirm if this information is exactly correct by replying 'Yes' or 'No'.";
+                    string aiResponse = await _groqService.GenerateBotResponseAsync(prompt);
+
+                    await botClient.SendMessage(chatId, aiResponse, cancellationToken: cancellationToken);
                 }
                 catch (Exception ex)
                 {
@@ -163,7 +201,7 @@ namespace CarInsuranceBot.Services
                     await botClient.SendMessage(chatId, "❌ Error reading document. Please try again with a better photo.", cancellationToken: cancellationToken);
                 }
             }
-            // Scenario: Processing Vehicle Document
+            // Обработка Техпаспорта
             else if (session.CurrentState == BotState.WaitingForVehicleDocument)
             {
                 await botClient.SendMessage(chatId, "✅ Vehicle document received! Analyzing... ⏳", cancellationToken: cancellationToken);
@@ -176,7 +214,11 @@ namespace CarInsuranceBot.Services
                     session.CurrentState = BotState.WaitingForPaymentConfirmation;
                     _sessionService.UpdateSession(session);
 
-                    await botClient.SendMessage(chatId, $"🚗 Vehicle Details Extracted:\n\n{parsedData}\n\nIs this correct? If so, I will prepare your policy!", cancellationToken: cancellationToken);
+                    await botClient.SendMessage(chatId, "Thinking... ⏳", cancellationToken: cancellationToken);
+                    string prompt = $"Tell the user that you successfully extracted their vehicle data:\n{parsedData}\nPolitely ask them to confirm if this information is exactly correct by replying 'Yes' or 'No'.";
+                    string aiResponse = await _groqService.GenerateBotResponseAsync(prompt);
+
+                    await botClient.SendMessage(chatId, aiResponse, cancellationToken: cancellationToken);
                 }
                 catch (Exception ex)
                 {

@@ -24,7 +24,7 @@ builder.Services.AddSingleton<ISessionService, InMemorySessionService>();
 
 // Register AI & Logic Services
 builder.Services.AddSingleton<IMindeeService, MindeeService>();
-builder.Services.AddSingleton<IGroqService, GroqService>();
+builder.Services.AddHttpClient<IGroqService, GroqService>();
 
 // Register the Telegram Bot Worker as a Background Service
 builder.Services.AddHostedService<TelegramBotHostedService>();

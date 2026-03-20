@@ -1,82 +1,78 @@
-﻿using System.Net.Http.Headers;
+﻿using System;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace CarInsuranceBot.Services
 {
-    /// <summary>
-    /// Service responsible for interacting with the Groq Cloud API 
-    /// to generate natural language responses using Large Language Models.
-    /// </summary>
     public class GroqService : IGroqService
     {
+        private readonly HttpClient _httpClient;
         private readonly string _apiKey;
-        private const string ApiUrl = "https://api.groq.com/openai/v1/chat/completions";
-        private const string ModelName = "llama-3.3-70b-versatile";
+        private readonly ILogger<GroqService> _logger;
 
-        public GroqService(IConfiguration config)
+        public GroqService(HttpClient httpClient, IConfiguration configuration, ILogger<GroqService> logger)
         {
-            _apiKey = config["BotConfiguration:GroqApiKey"] 
-                      ?? throw new Exception("Groq API Key is missing in configuration.");
+            _httpClient = httpClient;
+            _apiKey = configuration["BotConfiguration:GroqApiKey"] ?? throw new ArgumentNullException("GroqApiKey is missing");
+            _logger = logger;
+
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+            // Groq API совместим с OpenAI форматом
+            _httpClient.BaseAddress = new Uri("https://api.groq.com/openai/v1/");
         }
 
-        /// <summary>
-        /// Generates a personalized final congratulatory message for the user 
-        /// after successful document processing.
-        /// </summary>
-        /// <returns>A string containing the AI-generated message or a fallback default.</returns>
+        public async Task<string> GenerateBotResponseAsync(string prompt)
+        {
+            return await SendGroqRequestAsync(prompt, "You are a helpful, polite, and professional AI Car Insurance Assistant.");
+        }
+
         public async Task<string> GenerateFinalMessageAsync()
+        {
+            string prompt = "Generate a formal and creative dummy car insurance policy for the user. Include a policy number, coverage details (standard 100 USD fixed price), and a polite thank you message for choosing our service.";
+            return await SendGroqRequestAsync(prompt, "You are a professional insurance agent issuing a policy.");
+        }
+
+        private async Task<string> SendGroqRequestAsync(string userPrompt, string systemPrompt)
         {
             try
             {
-                using var httpClient = new HttpClient();
-                httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
-
-                // System prompt to guide the AI personality and output constraints
-                string prompt = "You are a polite and cheerful insurance agent. The client has successfully provided all documents " +
-                                "(passport and vehicle registration), and their car insurance is approved. " +
-                                "Write a short message (2-3 sentences) in Russian. Congratulate them on the successful issuance, " +
-                                "mention that the electronic PDF document will be uploaded to this chat shortly, " +
-                                "and wish them luck on the roads. Do not use Markdown formatting.";
-
                 var requestBody = new
                 {
-                    model = ModelName,
+                    model = "llama-3.1-8b-instant", // Заменили на актуальную и самую быструю модель Groq
                     messages = new[]
                     {
-                        new { role = "user", content = prompt }
-                    }
+                        new { role = "system", content = systemPrompt },
+                        new { role = "user", content = userPrompt }
+                    },
+                    temperature = 0.7
                 };
 
-                var json = JsonSerializer.Serialize(requestBody);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
+                var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
+                var response = await _httpClient.PostAsync("chat/completions", content);
 
-                var response = await httpClient.PostAsync(ApiUrl, content);
-                var responseString = await response.Content.ReadAsStringAsync();
-
+                // Если сервер вернул ошибку (например, 400 Bad Request)
                 if (!response.IsSuccessStatusCode)
                 {
-                    // Log API errors for internal debugging
-                    Console.WriteLine($"Groq API Error: {responseString}");
-                    
-                    // Logical fallback if the AI service is unavailable
-                    return "🎉 Поздравляем! Ваш страховой полис успешно оформлен. Электронный документ скоро появится в этом чате. Удачи на дорогах!";
+                    string errorDetails = await response.Content.ReadAsStringAsync();
+                    _logger.LogError($"Groq API Error Details (Status {response.StatusCode}): {errorDetails}");
+                    return "I apologize, my AI core rejected the request. Please try again.";
                 }
 
-                using var document = JsonDocument.Parse(responseString);
-                var reply = document.RootElement
-                    .GetProperty("choices")[0]
-                    .GetProperty("message")
-                    .GetProperty("content")
-                    .GetString();
+                var responseString = await response.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(responseString);
+                var reply = doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
 
-                return reply ?? "Ваш полис готов!";
+                return reply?.Trim() ?? "I'm sorry, I couldn't generate a response.";
             }
             catch (Exception ex)
             {
-                // Catch network or parsing exceptions
-                Console.WriteLine($"Groq Service Exception: {ex.Message}");
-                return "🎉 Ваш страховой полис успешно оформлен! Счастливого пути!";
+                _logger.LogError($"Groq Internal Error: {ex.Message}");
+                return "I apologize, but my AI core is currently unavailable. Please try again in a moment.";
             }
         }
     }
